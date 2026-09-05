@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>doodle fit — draw a curve, get a polynomial</title>
+<meta name="description" content="Draw a curve with your finger or mouse and watch a least-squares polynomial fit itself to your doodle. No dependencies, no build step.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23faf8f3'/%3E%3Cpath d='M4 22C9 6 15 26 21 14s6-6 7-8' fill='none' stroke='%23e8590c' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#faf8f3;
+    --grid:#e7e1d4;
+    --grid-strong:#d8d0be;
+    --axis:#c3b9a2;
+    --ink:#22201d;
+    --ink-soft:#6b655c;
+    --ink-faint:#a29a8c;
+    --stroke:#3a3733;
+    --fit:#e8590c;
+    --fit-soft:rgba(232,89,12,.35);
+    --panel:rgba(255,255,255,.82);
+    --panel-line:rgba(34,32,29,.10);
+    --shadow:0 1px 2px rgba(40,34,24,.06), 0 12px 32px -12px rgba(40,34,24,.28);
+    --radius:16px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#14161a;
+      --grid:#20242b;
+      --grid-strong:#2a3038;
+      --axis:#3a424e;
+      --ink:#e8eaee;
+      --ink-soft:#9aa3b0;
+      --ink-faint:#5d6672;
+      --stroke:#cdd4de;
+      --fit:#ffa94d;
+      --fit-soft:rgba(255,169,77,.32);
+      --panel:rgba(24,27,33,.78);
+      --panel-line:rgba(255,255,255,.10);
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 16px 40px -14px rgba(0,0,0,.7);
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.45 ui-sans-serif,-apple-system,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+    overflow:hidden; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  canvas{position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:crosshair}
+
+  .brand{
+    position:fixed; top:max(18px,env(safe-area-inset-top)); left:20px; z-index:3;
+    pointer-events:none; user-select:none;
+  }
+  .brand h1{
+    margin:0; font-size:15px; font-weight:650; letter-spacing:-.01em;
+    display:flex; align-items:center; gap:7px;
+  }
+  .brand h1 .dot{width:8px;height:8px;border-radius:50%;background:var(--fit);box-shadow:0 0 0 4px var(--fit-soft)}
+  .brand p{margin:3px 0 0 15px; font-size:12.5px; color:var(--ink-faint)}
+
+  /* ---- empty state ---- */
+  .hint{
+    position:fixed; inset:0; z-index:2; display:grid; place-content:center; text-align:center;
+    gap:14px; pointer-events:none; transform:translateY(-9vh);
+    transition:opacity .45s ease, transform .45s ease;
+  }
+  .hint.gone{opacity:0; transform:translateY(calc(-9vh - 6px))}
+  .hint h2{margin:0; font-size:clamp(22px,4.4vw,34px); font-weight:600; letter-spacing:-.02em}
+  .hint span{display:block; font-size:14px; color:var(--ink-faint); margin-top:6px}
+  .hint .demo{
+    pointer-events:auto; justify-self:center; border:1px solid var(--panel-line);
+    background:var(--panel); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+    color:var(--ink-soft); border-radius:999px; padding:8px 16px; font:inherit; font-size:13px;
+    cursor:pointer; box-shadow:var(--shadow); transition:transform .15s ease, color .15s ease;
+  }
+  .hint .demo:hover{transform:translateY(-1px); color:var(--ink)}
+
+  /* ---- result panel ---- */
+  .panel{
+    position:fixed; z-index:4; left:50%; bottom:max(18px,env(safe-area-inset-bottom));
+    transform:translate(-50%, 130%); width:min(680px, calc(100vw - 28px));
+    background:var(--panel); backdrop-filter:blur(16px) saturate(1.3); -webkit-backdrop-filter:blur(16px) saturate(1.3);
+    border:1px solid var(--panel-line); border-radius:var(--radius); box-shadow:var(--shadow);
+    padding:13px 15px 14px; opacity:0;
+    transition:transform .42s cubic-bezier(.22,1,.36,1), opacity .3s ease;
+  }
+  .panel.show{transform:translate(-50%,0); opacity:1}
+  .row{display:flex; align-items:center; gap:14px}
+  .stats{display:flex; gap:18px; align-items:baseline}
+  .stat{display:flex; align-items:baseline; gap:6px; white-space:nowrap}
+  .stat .k{font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-faint)}
+  .stat .v{font-size:16px; font-weight:600; font-variant-numeric:tabular-nums}
+  .spacer{flex:1}
+  .actions{display:flex; gap:6px}
+  button{font:inherit; color:var(--ink-soft); cursor:pointer}
+  .icon{
+    border:1px solid transparent; background:transparent; border-radius:9px; padding:6px 10px;
+    font-size:13px; transition:background .15s ease, color .15s ease, border-color .15s ease;
+  }
+  .icon:hover{background:rgba(128,128,128,.13); color:var(--ink)}
+  .icon:active{transform:translateY(1px)}
+
+  .deg{margin-top:11px; padding-top:11px; border-top:1px solid var(--panel-line)}
+  .deg label{font-size:12.5px; color:var(--ink-soft); white-space:nowrap}
+  .deg label b{color:var(--ink); font-variant-numeric:tabular-nums; font-weight:650}
+  input[type=range]{
+    -webkit-appearance:none; appearance:none; flex:1; height:22px; background:transparent; cursor:pointer; margin:0;
+  }
+  input[type=range]::-webkit-slider-runnable-track{height:4px; border-radius:2px; background:linear-gradient(90deg,var(--fit) var(--pct,30%), rgba(128,128,128,.22) var(--pct,30%))}
+  input[type=range]::-moz-range-track{height:4px; border-radius:2px; background:rgba(128,128,128,.22)}
+  input[type=range]::-moz-range-progress{height:4px; border-radius:2px; background:var(--fit)}
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:16px; height:16px; margin-top:-6px; border-radius:50%;
+    background:var(--bg); border:2px solid var(--fit); box-shadow:0 1px 4px rgba(0,0,0,.22); transition:transform .12s ease;
+  }
+  input[type=range]:active::-webkit-slider-thumb{transform:scale(1.15)}
+  input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--bg);border:2px solid var(--fit)}
+  .chip{
+    border:1px solid var(--panel-line); background:transparent; border-radius:999px; padding:5px 12px; font-size:12.5px;
+    transition:all .15s ease; white-space:nowrap;
+  }
+  .chip:hover{color:var(--ink)}
+  .chip[aria-pressed="true"]{background:var(--fit); border-color:var(--fit); color:#fff}
+
+  .eq{
+    margin-top:11px; font:13.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    color:var(--ink); word-break:break-word; letter-spacing:-.01em;
+  }
+  .eq .op{color:var(--ink-faint)}
+  .note{margin-top:7px; font-size:12px; color:var(--ink-faint)}
+  .note:empty{display:none}
+
+  .toast{
+    position:fixed; z-index:6; left:50%; bottom:calc(max(18px,env(safe-area-inset-bottom)) + 190px);
+    transform:translate(-50%,8px); background:var(--ink); color:var(--bg);
+    padding:8px 14px; border-radius:999px; font-size:12.5px; opacity:0; pointer-events:none;
+    transition:opacity .2s ease, transform .2s ease;
+  }
+  .toast.show{opacity:1; transform:translate(-50%,0)}
+
+  .keys{
+    position:fixed; z-index:3; right:18px; top:max(18px,env(safe-area-inset-top));
+    font-size:11.5px; color:var(--ink-faint); text-align:right; user-select:none; pointer-events:none;
+  }
+  .keys kbd{
+    font:inherit; border:1px solid var(--panel-line); border-radius:5px; padding:1px 5px;
+    background:var(--panel); color:var(--ink-soft);
+  }
+  @media (max-width:620px){
+    .keys{display:none}
+    .panel{padding:12px 13px 13px}
+    .stats{gap:14px}
+    .brand p{display:none}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{transition-duration:.01ms !important}
+  }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Drawing area: draw a curve to fit a polynomial"></canvas>
+
+<div class="brand">
+  <h1><span class="dot"></span>doodle fit</h1>
+  <p>draw a curve — get the polynomial</p>
+</div>
+
+<div class="keys"><kbd>[</kbd> <kbd>]</kbd> degree · <kbd>A</kbd> auto · <kbd>C</kbd> clear · <kbd>S</kbd> save</div>
+
+<div class="hint" id="hint">
+  <h2>Draw a curve<span>click or touch anywhere and sketch, left to right</span></h2>
+  <button class="demo" id="demoBtn">draw one for me</button>
+</div>
+
+<div class="panel" id="panel" role="region" aria-label="Fit results">
+  <div class="row">
+    <div class="stats">
+      <div class="stat"><span class="k">R²</span><span class="v" id="r2">—</span></div>
+      <div class="stat"><span class="k">RMSE</span><span class="v" id="rmse">—</span></div>
+    </div>
+    <div class="spacer"></div>
+    <div class="actions">
+      <button class="icon" id="copyBtn" title="Copy equation">copy</button>
+      <button class="icon" id="saveBtn" title="Save as PNG">save</button>
+      <button class="icon" id="clearBtn" title="Clear canvas">clear</button>
+    </div>
+  </div>
+  <div class="row deg">
+    <label for="degree">degree <b id="degVal">3</b></label>
+    <input id="degree" type="range" min="1" max="15" step="1" value="3" aria-label="Polynomial degree">
+    <button class="chip" id="autoBtn" aria-pressed="true">auto</button>
+  </div>
+  <div class="eq" id="eq"></div>
+  <div class="note" id="note"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d', { alpha: false });
+  const $ = id => document.getElementById(id);
+  const hintEl = $('hint'), panel = $('panel'), eqEl = $('eq'), noteEl = $('note');
+  const r2El = $('r2'), rmseEl = $('rmse'), degSlider = $('degree'), degVal = $('degVal');
+  const autoBtn = $('autoBtn'), toastEl = $('toast');
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---------- view: canvas px <-> data units (x spans 0..10, y scaled equally) ----------
+  let W = 0, H = 0, dpr = 1, scale = 1;
+  const X_SPAN = 10;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    W = cv.clientWidth; H = cv.clientHeight;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    scale = W / X_SPAN;
+    render();
+  }
+  const toData = (px, py) => ({ x: px / scale, y: (H / 2 - py) / scale });
+  const toPxX = x => x * scale;
+  const toPxY = y => H / 2 - y * scale;
+
+  // ---------- state ----------
+  let stroke = [];          // raw points in data units, captured while drawing
+  let samples = [];         // arc-length resampled points used for fitting
+  let fit = null;           // { c, deg, xc, xs, r2, rmse, xmin, xmax }
+  let drawing = false;
+  let autoDegree = true;
+  let reveal = 1;           // 0..1 sweep animation for the fitted curve
+  let revealFrom = 0, revealAt = 0, revealMs = 0;
+  let dirty = true, idleT = 0;
+
+  // ---------- least squares: Householder QR on a normalized Vandermonde ----------
+  function lstsq(A, b, m, n) {
+    const R = Float64Array.from(A), y = Float64Array.from(b);
+    for (let k = 0; k < n; k++) {
+      let nrm = 0;
+      for (let i = k; i < m; i++) nrm += R[i * n + k] * R[i * n + k];
+      nrm = Math.sqrt(nrm);
+      if (nrm === 0) continue;
+      if (R[k * n + k] > 0) nrm = -nrm;
+      const v = new Float64Array(m);
+      for (let i = k; i < m; i++) v[i] = R[i * n + k];
+      v[k] -= nrm;
+      let vtv = 0;
+      for (let i = k; i < m; i++) vtv += v[i] * v[i];
+      if (vtv < 1e-300) continue;
+      for (let j = k; j < n; j++) {
+        let s = 0;
+        for (let i = k; i < m; i++) s += v[i] * R[i * n + j];
+        s = 2 * s / vtv;
+        for (let i = k; i < m; i++) R[i * n + j] -= s * v[i];
+      }
+      let s = 0;
+      for (let i = k; i < m; i++) s += v[i] * y[i];
+      s = 2 * s / vtv;
+      for (let i = k; i < m; i++) y[i] -= s * v[i];
+    }
+    const x = new Float64Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+      let sum = y[i];
+      for (let j = i + 1; j < n; j++) sum -= R[i * n + j] * x[j];
+      const d = R[i * n + i];
+      x[i] = Math.abs(d) < 1e-12 ? 0 : sum / d;
+    }
+    return x;
+  }
+
+  // Coefficients live in t = (x - xc)/xs, which keeps high degrees well conditioned.
+  const evalFit = (f, x) => {
+    const t = (x - f.xc) / f.xs;
+    let v = 0;
+    for (let i = f.c.length - 1; i >= 0; i--) v = v * t + f.c[i];
+    return v;
+  };
+
+  function fitPoly(pts, degree) {
+    const m = pts.length;
+    if (m < 2) return null;
+    let xmin = Infinity, xmax = -Infinity;
+    for (const p of pts) { if (p.x < xmin) xmin = p.x; if (p.x > xmax) xmax = p.x; }
+    const xc = (xmin + xmax) / 2;
+    const xs = Math.max((xmax - xmin) / 2, 1e-9);
+    const deg = Math.max(1, Math.min(degree, m - 1, 15));
+    const n = deg + 1;
+    const A = new Float64Array(m * n), b = new Float64Array(m);
+    for (let i = 0; i < m; i++) {
+      const t = (pts[i].x - xc) / xs;
+      let p = 1;
+      for (let j = 0; j < n; j++) { A[i * n + j] = p; p *= t; }
+      b[i] = pts[i].y;
+    }
+    const c = lstsq(A, b, m, n);
+    let sse = 0, sy = 0;
+    for (const p of pts) sy += p.y;
+    const my = sy / m;
+    let sst = 0;
+    const f = { c, deg, xc, xs, xmin, xmax };
+    for (const p of pts) {
+      const r = p.y - evalFit(f, p.x);
+      sse += r * r;
+      sst += (p.y - my) * (p.y - my);
+    }
+    f.sse = sse;
+    f.rmse = Math.sqrt(sse / m);
+    f.r2 = sst > 1e-12 ? Math.max(0, 1 - sse / sst) : 1;
+    return f;
+  }
+
+  // Generalized cross-validation picks the simplest degree that still explains the doodle.
+  // Residuals finer than half a pixel are hand/screen quantization, not signal: clamping the
+  // error there keeps the search from chasing noise up to degree 12 on a clean stroke.
+  function bestFit(pts) {
+    const m = pts.length;
+    const maxDeg = Math.min(12, m - 2);
+    const floor = m * Math.pow(0.5 / scale, 2);
+    const cand = [];
+    let bestScore = Infinity;
+    for (let d = 1; d <= maxDeg; d++) {
+      const f = fitPoly(pts, d);
+      if (!f) continue;
+      const den = m - (d + 1);
+      if (den <= 0) break;
+      f.score = (m * Math.max(f.sse, floor)) / (den * den);
+      cand.push(f);
+      if (f.score < bestScore) bestScore = f.score;
+    }
+    if (!cand.length) return fitPoly(pts, 3);
+    // simplest curve that is essentially as good as the best one
+    return cand.find(f => f.score <= bestScore * 1.05) || cand[0];
+  }
+
+  // ---------- stroke processing ----------
+  function resample(pts, target = 220) {
+    if (pts.length < 3) return pts.slice();
+    let total = 0;
+    const seg = [0];
+    for (let i = 1; i < pts.length; i++) {
+      total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+      seg.push(total);
+    }
+    if (total < 1e-9) return pts.slice(0, 1);
+    const n = Math.max(12, Math.min(target, pts.length));
+    const out = [];
+    let j = 1;
+    for (let i = 0; i < n; i++) {
+      const d = (total * i) / (n - 1);
+      while (j < seg.length - 1 && seg[j] < d) j++;
+      const t0 = seg[j - 1], t1 = seg[j];
+      const u = t1 > t0 ? (d - t0) / (t1 - t0) : 0;
+      out.push({
+        x: pts[j - 1].x + (pts[j].x - pts[j - 1].x) * u,
+        y: pts[j - 1].y + (pts[j].y - pts[j - 1].y) * u
+      });
+    }
+    return out;
+  }
+
+  function backtrackRatio(pts) {
+    let back = 0, total = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const dx = pts[i].x - pts[i - 1].x;
+      total += Math.abs(dx);
+      if (dx < 0) back += -dx;
+    }
+    return total > 1e-9 ? back / total : 0;
+  }
+
+  function recompute(animate) {
+    samples = resample(stroke);
+    if (samples.length < 4) { fit = null; panel.classList.remove('show'); dirty = true; return; }
+    fit = autoDegree ? bestFit(samples) : fitPoly(samples, +degSlider.value);
+    if (!fit) return;
+    if (autoDegree) setSlider(fit.deg);
+    if (animate && !reduceMotion) startReveal(0, 620); else reveal = 1;
+    showResults();
+    dirty = true;
+  }
+
+  function startReveal(from, ms) {
+    revealFrom = from; revealAt = performance.now(); revealMs = ms; reveal = from;
+  }
+
+  // ---------- equation formatting (converted back to the plain x basis) ----------
+  const SUP = ['', '', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+  const supFor = k => (k === 1 ? '' : k < 10 ? SUP[k] : '^' + k);
+
+  function coeffsInX(f) {
+    const n = f.c.length, out = new Float64Array(n);
+    const binom = (a, b) => { let r = 1; for (let i = 0; i < b; i++) r = r * (a - i) / (i + 1); return r; };
+    for (let k = 0; k < n; k++) {
+      const ak = f.c[k] / Math.pow(f.xs, k);
+      for (let j = 0; j <= k; j++) out[j] += ak * binom(k, j) * Math.pow(-f.xc, k - j);
+    }
+    return out;
+  }
+
+  const SUP_DIGITS = { '0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹','-':'⁻' };
+  const supNum = s => s.split('').map(ch => SUP_DIGITS[ch] || '').join('');
+
+  function num(v) {
+    const a = Math.abs(v);
+    if (a >= 1e5 || (a < 1e-3 && a > 0)) {
+      const [mant, exp] = v.toExponential(2).split('e');
+      return mant + '×10' + supNum(exp.replace('+', ''));
+    }
+    return String(+v.toPrecision(3));
+  }
+
+  function equationText(f) {
+    const c = coeffsInX(f);
+    let peak = 0;
+    for (const v of c) peak = Math.max(peak, Math.abs(v));
+    const cutoff = peak * 1e-6;
+    const parts = [];
+    for (let k = c.length - 1; k >= 0; k--) {
+      const v = c[k];
+      if (Math.abs(v) < cutoff && parts.length) continue;
+      const sign = v < 0 ? '−' : '+';
+      const body = num(Math.abs(v)) + (k === 0 ? '' : 'x' + supFor(k));
+      parts.push(parts.length === 0 ? (v < 0 ? '−' + body : body) : ' ' + sign + ' ' + body);
+    }
+    return 'ŷ = ' + (parts.join('') || '0');
+  }
+
+  function showResults() {
+    if (!fit) return;
+    r2El.textContent = fit.r2 >= 0.9995 ? '1.000' : fit.r2.toFixed(3);
+    rmseEl.textContent = fit.rmse.toFixed(3);
+    degVal.textContent = fit.deg;
+    eqEl.textContent = equationText(fit);
+    const back = backtrackRatio(samples);
+    noteEl.textContent = back > 0.12
+      ? 'Heads up: your doodle loops back on itself, and a polynomial only has one y per x — draw left to right for a tighter fit.'
+      : (fit.deg >= 10 ? 'High degree: hugs your ink, goes wild everywhere else — the printed coefficients are rounded.' : '');
+    panel.classList.add('show');
+  }
+
+  function setSlider(d) {
+    degSlider.value = d;
+    degVal.textContent = d;
+    degSlider.style.setProperty('--pct', ((d - 1) / 14 * 100).toFixed(1) + '%');
+  }
+
+  // ---------- rendering ----------
+  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  let C = {};
+  function readTheme() {
+    C = {
+      bg: css('--bg'), grid: css('--grid'), gridStrong: css('--grid-strong'), axis: css('--axis'),
+      stroke: css('--stroke'), fit: css('--fit'), faint: css('--ink-faint')
+    };
+  }
+
+  function gridLines(step, color) {
+    if (step < 8) return;
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    for (let x = 0; x <= W + 0.5; x += step) { ctx.moveTo(Math.round(x) + .5, 0); ctx.lineTo(Math.round(x) + .5, H); }
+    for (let y = H / 2; y <= H; y += step) { ctx.moveTo(0, Math.round(y) + .5); ctx.lineTo(W, Math.round(y) + .5); }
+    for (let y = H / 2 - step; y >= 0; y -= step) { ctx.moveTo(0, Math.round(y) + .5); ctx.lineTo(W, Math.round(y) + .5); }
+    ctx.stroke();
+  }
+
+  function drawGrid() {
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, W, H);
+    ctx.lineWidth = 1;
+    gridLines(scale / 4, C.grid);          // graph-paper subdivisions (skipped when too dense)
+    gridLines(scale, C.gridStrong);        // one data unit
+    ctx.strokeStyle = C.axis;
+    ctx.beginPath();
+    ctx.moveTo(0, Math.round(H / 2) + .5); ctx.lineTo(W, Math.round(H / 2) + .5);
+    ctx.stroke();
+  }
+
+  function pathThrough(pts, mapX, mapY) {
+    ctx.beginPath();
+    if (!pts.length) return;
+    ctx.moveTo(mapX(pts[0]), mapY(pts[0]));
+    for (let i = 1; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      ctx.quadraticCurveTo(mapX(a), mapY(a), (mapX(a) + mapX(b)) / 2, (mapY(a) + mapY(b)) / 2);
+    }
+    const last = pts[pts.length - 1];
+    ctx.lineTo(mapX(last), mapY(last));
+  }
+
+  function drawStroke() {
+    if (stroke.length < 2) return;
+    ctx.save();
+    ctx.lineJoin = ctx.lineCap = 'round';
+    ctx.strokeStyle = C.stroke;
+    ctx.globalAlpha = fit ? 0.5 : 0.9;
+    ctx.lineWidth = fit ? 2.4 : 3;
+    pathThrough(stroke, p => toPxX(p.x), p => toPxY(p.y));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawFit() {
+    if (!fit) return;
+    const guard = H * 3;
+    const line = (x0, x1, dashed, alpha) => {
+      if (x1 <= x0) return;
+      ctx.save();
+      ctx.lineJoin = ctx.lineCap = 'round';
+      ctx.strokeStyle = C.fit;
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = dashed ? 2 : 3.2;
+      if (dashed) ctx.setLineDash([2, 7]);
+      else { ctx.shadowColor = C.fit; ctx.shadowBlur = 14; }
+      ctx.beginPath();
+      let pen = false;
+      for (let px = toPxX(x0); px <= toPxX(x1) + 1e-6; px += 1.5) {
+        const py = toPxY(evalFit(fit, px / scale));
+        if (!isFinite(py) || py < -guard || py > H + guard) { pen = false; continue; }
+        if (pen) ctx.lineTo(px, py); else { ctx.moveTo(px, py); pen = true; }
+      }
+      ctx.stroke();
+      ctx.restore();
+    };
+    const a = fit.xmin, b = fit.xmax;
+    const end = a + (b - a) * reveal;
+    line(a, end, false, 1);
+    if (reveal >= 1) {
+      const tail = Math.min(0.35, (b - a) * 0.35);
+      line(0, a, true, 0.4);
+      line(b, X_SPAN, true, 0.4);
+      void tail;
+    }
+  }
+
+  function drawGhost(t) {
+    // idle invitation: a faint dashed wave that breathes
+    ctx.save();
+    ctx.strokeStyle = C.faint;
+    ctx.globalAlpha = 0.45;
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = 'round';
+    ctx.setLineDash([1, 10]);
+    ctx.lineDashOffset = -t / 26;
+    ctx.beginPath();
+    // sits below the headline so the invitation stays legible
+    const y0 = H / 2 + Math.min(H * 0.24, 165), amp = Math.min(H * 0.08, 64), x0 = W * 0.18, x1 = W * 0.82;
+    for (let px = x0; px <= x1; px += 3) {
+      const u = (px - x0) / (x1 - x0);
+      const py = y0 + Math.sin(u * Math.PI * 2.1 + t / 900) * amp * (0.55 + 0.45 * Math.sin(u * Math.PI));
+      px === x0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function render() {
+    drawGrid();
+    if (!stroke.length && !fit) drawGhost(idleT);
+    drawStroke();
+    drawFit();
+    dirty = false;
+  }
+
+  function frame(now) {
+    if (revealMs) {
+      const p = Math.min(1, (now - revealAt) / revealMs);
+      const eased = 1 - Math.pow(1 - p, 3);
+      reveal = revealFrom + (1 - revealFrom) * eased;
+      dirty = true;
+      if (p >= 1) { revealMs = 0; reveal = 1; }
+    }
+    if (!stroke.length && !fit) { idleT = now; dirty = true; }
+    if (dirty) render();
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- input ----------
+  function pointerPos(e) {
+    const r = cv.getBoundingClientRect();
+    return toData(e.clientX - r.left, e.clientY - r.top);
+  }
+
+  cv.addEventListener('pointerdown', e => {
+    if (e.button !== undefined && e.button !== 0) return;
+    try { cv.setPointerCapture(e.pointerId); } catch { /* capture is a nicety, not a requirement */ }
+    drawing = true;
+    fit = null; reveal = 1; revealMs = 0;
+    stroke = [pointerPos(e)];
+    hintEl.classList.add('gone');
+    panel.classList.remove('show');
+    dirty = true;
+  });
+
+  cv.addEventListener('pointermove', e => {
+    if (!drawing) return;
+    let evs = [e];
+    if (e.getCoalescedEvents) {
+      const c = e.getCoalescedEvents();
+      if (c && c.length) evs = c;
+    }
+    for (const ev of evs) {
+      const p = pointerPos(ev);
+      const last = stroke[stroke.length - 1];
+      if (!last || Math.hypot(p.x - last.x, p.y - last.y) * scale > 1.2) stroke.push(p);
+    }
+    dirty = true;
+  });
+
+  function endStroke() {
+    if (!drawing) return;
+    drawing = false;
+    if (stroke.length < 4) { stroke = []; hintEl.classList.remove('gone'); dirty = true; return; }
+    recompute(true);
+  }
+  cv.addEventListener('pointerup', endStroke);
+  cv.addEventListener('pointercancel', endStroke);
+  addEventListener('pointerup', endStroke);      // backstop if the pointer is released off-canvas
+  addEventListener('blur', endStroke);
+
+  degSlider.addEventListener('input', () => {
+    setSlider(+degSlider.value);
+    if (autoDegree) { autoDegree = false; autoBtn.setAttribute('aria-pressed', 'false'); }
+    if (samples.length >= 4) { fit = fitPoly(samples, +degSlider.value); reveal = 1; revealMs = 0; showResults(); dirty = true; }
+  });
+
+  autoBtn.addEventListener('click', () => {
+    autoDegree = !autoDegree;
+    autoBtn.setAttribute('aria-pressed', String(autoDegree));
+    if (autoDegree && samples.length >= 4) { fit = bestFit(samples); setSlider(fit.deg); reveal = 1; showResults(); dirty = true; }
+  });
+
+  function clearAll() {
+    stroke = []; samples = []; fit = null; drawing = false; revealMs = 0;
+    panel.classList.remove('show');
+    hintEl.classList.remove('gone');
+    dirty = true;
+  }
+  $('clearBtn').addEventListener('click', clearAll);
+
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => toastEl.classList.remove('show'), 1600);
+  }
+
+  $('copyBtn').addEventListener('click', async () => {
+    if (!fit) return;
+    const text = equationText(fit) + `   (R² = ${fit.r2.toFixed(4)}, RMSE = ${fit.rmse.toFixed(4)}, degree ${fit.deg})`;
+    try { await navigator.clipboard.writeText(text); toast('equation copied'); }
+    catch { toast('copy blocked by the browser'); }
+  });
+
+  $('saveBtn').addEventListener('click', () => {
+    render();
+    cv.toBlob(blob => {
+      if (!blob) { toast('could not save'); return; }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'doodle-fit.png';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      toast('saved png');
+    });
+  });
+
+  addEventListener('keydown', e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === 'c') { clearAll(); }
+    else if (k === 'a') { autoBtn.click(); }
+    else if (k === 's') { e.preventDefault(); $('saveBtn').click(); }
+    else if (k === '[' || k === 'arrowleft') { nudge(-1); }
+    else if (k === ']' || k === 'arrowright') { nudge(1); }
+  });
+  function nudge(d) {
+    if (!fit) return;
+    const next = Math.max(1, Math.min(15, +degSlider.value + d));
+    setSlider(next);
+    degSlider.dispatchEvent(new Event('input'));
+  }
+
+  // ---------- "draw one for me" ----------
+  $('demoBtn').addEventListener('click', () => {
+    clearAll();
+    hintEl.classList.add('gone');
+    const yScale = Math.min((H / 2) / scale, 3.2) * 0.78;
+    const seed = Math.random() * 10;
+    const pts = [];
+    for (let i = 0; i <= 160; i++) {
+      const u = i / 160;
+      const x = 0.8 + u * 8.4;
+      // a couple of pixels of high-frequency hand tremor: visible as ink, ignored by the fit
+      const tremor = (Math.sin(u * 61 + seed) * 0.6 + Math.sin(u * 97 + seed * 2) * 0.4) * (1.8 / scale);
+      const y = (Math.sin(u * 5.1 + seed) * 0.6 + Math.sin(u * 2 + seed * 0.5) * 0.5 - 0.15) * yScale + tremor;
+      pts.push({ x, y });
+    }
+    let i = 0;
+    (function step() {
+      const chunk = reduceMotion ? pts.length : 6;
+      for (let k = 0; k < chunk && i < pts.length; k++, i++) stroke.push(pts[i]);
+      dirty = true;
+      if (i < pts.length) requestAnimationFrame(step);
+      else recompute(true);
+    })();
+  });
+
+  // ---------- boot ----------
+  const themeQuery = matchMedia('(prefers-color-scheme: dark)');
+  themeQuery.addEventListener?.('change', () => { readTheme(); dirty = true; });
+  addEventListener('resize', () => { readTheme(); resize(); });
+  readTheme();
+  setSlider(3);
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
