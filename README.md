@@ -29,8 +29,9 @@ Deploying is a file copy: any static host (GitHub Pages, Netlify, S3) serves it 
    extrapolation.
 4. **Tune** — the degree slider re-fits live; **auto** picks a degree for you. The
    equation, R², and RMSE update in place.
-5. **Keep** — `copy` puts the equation on your clipboard, `save` writes a PNG.
-   Drawing again replaces the old doodle.
+5. **Keep** — `copy` puts the equation on your clipboard, `save` writes a PNG with
+   the equation, degree, R², and RMSE stamped into the image. Drawing again replaces
+   the old doodle.
 
 Keyboard: `[` / `]` degree · `A` auto · `C` clear · `S` save.
 

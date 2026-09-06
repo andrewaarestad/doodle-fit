@@ -455,7 +455,7 @@
   function readTheme() {
     C = {
       bg: css('--bg'), grid: css('--grid'), gridStrong: css('--grid-strong'), axis: css('--axis'),
-      stroke: css('--stroke'), fit: css('--fit'), faint: css('--ink-faint')
+      stroke: css('--stroke'), fit: css('--fit'), faint: css('--ink-faint'), ink: css('--ink')
     };
   }
 
@@ -657,9 +657,55 @@
     catch { toast('copy blocked by the browser'); }
   });
 
-  $('saveBtn').addEventListener('click', () => {
+  // The panel is DOM, so a raw canvas export would lose the math. Stamp it into the image.
+  function exportCanvas() {
     render();
-    cv.toBlob(blob => {
+    const out = document.createElement('canvas');
+    out.width = cv.width; out.height = cv.height;
+    const o = out.getContext('2d');
+    o.drawImage(cv, 0, 0);
+    if (!fit) return out;
+    o.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const pad = 16, lh = 21, maxW = Math.min(W - 2 * pad - 24, 720);
+    const eqFont = '13.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+    o.font = eqFont;
+    const lines = [];
+    let line = '';
+    for (const word of equationText(fit).split(' ')) {
+      const next = line ? line + ' ' + word : word;
+      if (o.measureText(next).width > maxW && line) { lines.push(line); line = word; }
+      else line = next;
+    }
+    if (line) lines.push(line);
+    const stats = `degree ${fit.deg}   R² ${fit.r2 >= 0.9995 ? '1.000' : fit.r2.toFixed(3)}   RMSE ${fit.rmse.toFixed(3)}`;
+
+    const boxW = Math.max(...lines.map(t => o.measureText(t).width), o.measureText(stats).width) + pad * 2;
+    const boxH = (lines.length + 1) * lh + pad * 2 - 4;
+    const bx = 20, by = H - boxH - 20;
+
+    o.globalAlpha = 0.92;
+    o.fillStyle = C.bg;
+    o.strokeStyle = C.gridStrong;
+    o.lineWidth = 1;
+    o.beginPath();
+    if (o.roundRect) o.roundRect(bx, by, boxW, boxH, 12); else o.rect(bx, by, boxW, boxH);
+    o.fill();
+    o.stroke();
+    o.globalAlpha = 1;
+
+    o.textBaseline = 'top';
+    o.fillStyle = C.faint;
+    o.font = '11px ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif';
+    o.fillText(stats, bx + pad, by + pad);
+    o.fillStyle = C.ink;
+    o.font = eqFont;
+    lines.forEach((t, i) => o.fillText(t, bx + pad, by + pad + lh * (i + 1) - 2));
+    return out;
+  }
+
+  $('saveBtn').addEventListener('click', () => {
+    exportCanvas().toBlob(blob => {
       if (!blob) { toast('could not save'); return; }
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
