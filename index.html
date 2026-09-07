@@ -49,6 +49,10 @@
     overflow:hidden; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
   }
   canvas{position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; cursor:crosshair}
+  body[data-mode="pan"] canvas{cursor:grab}
+  body.grabbing canvas{cursor:grabbing}
+  .icon.draw[aria-pressed="true"]{background:var(--fit); border-color:var(--fit); color:#fff}
+  .icon.draw[aria-pressed="true"]:hover{background:var(--fit); color:#fff}
 
   .brand{
     position:fixed; top:max(18px,env(safe-area-inset-top)); left:20px; z-index:3;
@@ -88,7 +92,7 @@
     transition:transform .42s cubic-bezier(.22,1,.36,1), opacity .3s ease;
   }
   .panel.show{transform:translate(-50%,0); opacity:1}
-  .row{display:flex; align-items:center; gap:14px}
+  .row{display:flex; align-items:center; gap:14px; flex-wrap:wrap}
   .stats{display:flex; gap:18px; align-items:baseline}
   .stat{display:flex; align-items:baseline; gap:6px; white-space:nowrap}
   .stat .k{font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-faint)}
@@ -107,7 +111,8 @@
   .deg label{font-size:12.5px; color:var(--ink-soft); white-space:nowrap}
   .deg label b{color:var(--ink); font-variant-numeric:tabular-nums; font-weight:650}
   input[type=range]{
-    -webkit-appearance:none; appearance:none; flex:1; height:22px; background:transparent; cursor:pointer; margin:0;
+    -webkit-appearance:none; appearance:none; flex:1; min-width:0; height:22px;
+    background:transparent; cursor:pointer; margin:0;
   }
   input[type=range]::-webkit-slider-runnable-track{height:4px; border-radius:2px; background:linear-gradient(90deg,var(--fit) var(--pct,30%), rgba(128,128,128,.22) var(--pct,30%))}
   input[type=range]::-moz-range-track{height:4px; border-radius:2px; background:rgba(128,128,128,.22)}
@@ -160,11 +165,15 @@
     font:inherit; border:1px solid var(--panel-line); border-radius:5px; padding:1px 5px;
     background:var(--panel); color:var(--ink-soft);
   }
+  .keys div + div{margin-top:4px}
   @media (max-width:620px){
     .keys{display:none}
     .panel{padding:12px 13px 13px}
     .stats{gap:14px}
     .brand p{display:none}
+    .icon{padding:5px 8px; font-size:12.5px}
+    .actions{gap:2px}
+    .row{gap:10px}
   }
   @media (prefers-reduced-motion:reduce){
     *{transition-duration:.01ms !important}
@@ -179,7 +188,10 @@
   <p>draw a curve — fit a model</p>
 </div>
 
-<div class="keys"><kbd>M</kbd> model · <kbd>[</kbd> <kbd>]</kbd> degree · <kbd>A</kbd> auto · <kbd>C</kbd> clear · <kbd>S</kbd> save</div>
+<div class="keys">
+  <div>drag to pan · pinch or <kbd>⌘</kbd>/<kbd>ctrl</kbd> + scroll to zoom</div>
+  <div><kbd>N</kbd> new curve · <kbd>M</kbd> model · <kbd>0</kbd> reset view · <kbd>C</kbd> clear</div>
+</div>
 
 <div class="hint" id="hint">
   <h2>Draw a curve<span>sketch left to right, then fit a polynomial or a logistic curve</span></h2>
@@ -194,6 +206,8 @@
     </div>
     <div class="spacer"></div>
     <div class="actions">
+      <button class="icon" id="recenterBtn" title="Reset the view (0)" hidden>recenter</button>
+      <button class="icon draw" id="newBtn" aria-pressed="false" title="Draw a new curve (N)">new curve</button>
       <button class="icon" id="copyBtn" title="Copy equation">copy</button>
       <button class="icon" id="saveBtn" title="Save as PNG">save</button>
       <button class="icon" id="clearBtn" title="Clear canvas">clear</button>
@@ -229,23 +243,63 @@
   const r2El = $('r2'), rmseEl = $('rmse'), degSlider = $('degree'), degVal = $('degVal');
   const autoBtn = $('autoBtn'), toastEl = $('toast');
   const modelSel = $('model'), midEl = $('mid'), steepEl = $('steep');
+  const newBtn = $('newBtn'), recenterBtn = $('recenterBtn');
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  // ---------- view: canvas px <-> data units (x spans 0..10, y scaled equally) ----------
-  let W = 0, H = 0, dpr = 1, scale = 1;
-  const X_SPAN = 10;
+  // ---------- view: canvas px <-> data units, through a pannable/zoomable camera ----------
+  // Data coordinates never move, so a fit stays valid however the camera is placed.
+  let W = 0, H = 0, dpr = 1, scale = 1, base = 1;
+  const X_SPAN = 10, ZOOM_MIN = 0.15, ZOOM_MAX = 40;
+  const view = { ox: 0, oy: 0, zoom: 1 };
 
   function resize() {
     dpr = Math.min(window.devicePixelRatio || 1, 2.5);
     W = cv.clientWidth; H = cv.clientHeight;
     cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    scale = W / X_SPAN;
+    base = W / X_SPAN;
+    scale = base * view.zoom;
     render();
   }
-  const toData = (px, py) => ({ x: px / scale, y: (H / 2 - py) / scale });
-  const toPxX = x => x * scale;
-  const toPxY = y => H / 2 - y * scale;
+  const toPxX = x => x * scale + view.ox;
+  const toPxY = y => H / 2 - y * scale + view.oy;
+  const dataX = px => (px - view.ox) / scale;
+  const dataY = py => (H / 2 + view.oy - py) / scale;
+  const toData = (px, py) => ({ x: dataX(px), y: dataY(py) });
+  const viewMoved = () => view.ox !== 0 || view.oy !== 0 || view.zoom !== 1;
+
+  // Zoom about a screen point, keeping the data under it pinned there.
+  function zoomAt(factor, fx, fy) {
+    const z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, view.zoom * factor));
+    const f = z / view.zoom;
+    if (f === 1) return;
+    view.ox = fx - (fx - view.ox) * f;
+    view.oy = fy - H / 2 + (H / 2 + view.oy - fy) * f;
+    view.zoom = z;
+    scale = base * view.zoom;
+    syncView();
+  }
+
+  function panBy(dx, dy) {
+    view.ox += dx; view.oy += dy;
+    syncView();
+  }
+
+  let camAnim = null;
+  function animateView(target, ms) {
+    if (reduceMotion) { Object.assign(view, target); scale = base * view.zoom; syncView(); return; }
+    camAnim = { from: { ...view }, to: { ...view, ...target }, t0: performance.now(), ms };
+  }
+
+  function resetView(animate) {
+    if (animate) animateView({ ox: 0, oy: 0, zoom: 1 }, 380);
+    else { view.ox = 0; view.oy = 0; view.zoom = 1; scale = base; syncView(); }
+  }
+
+  function syncView() {
+    recenterBtn.hidden = !viewMoved();
+    dirty = true;
+  }
 
   // ---------- state ----------
   let stroke = [];          // raw points in data units, captured while drawing
@@ -254,6 +308,7 @@
   let drawing = false;
   let autoDegree = true;
   let model = 'poly';           // 'poly' | 'logistic'
+  let mode = 'draw';            // 'draw' | 'pan'
   let reveal = 1;           // 0..1 sweep animation for the fitted curve
   let revealFrom = 0, revealAt = 0, revealMs = 0;
   let dirty = true, idleT = 0;
@@ -583,13 +638,23 @@
     };
   }
 
+  // Pick a round data-unit spacing that stays near 100px on screen, whatever the zoom.
+  const STEPS = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500];
+  function gridStep() {
+    for (const t of STEPS) if (t * scale >= 96) return t;
+    return STEPS[STEPS.length - 1];
+  }
+
   function gridLines(step, color) {
-    if (step < 8) return;
+    const px = step * scale;
+    if (px < 9) return;
+    const x0 = Math.floor(dataX(0) / step) * step, x1 = dataX(W);
+    const y0 = Math.floor(dataY(H) / step) * step, y1 = dataY(0);
+    if ((x1 - x0) / step > 600 || (y1 - y0) / step > 600) return;
     ctx.strokeStyle = color;
     ctx.beginPath();
-    for (let x = 0; x <= W + 0.5; x += step) { ctx.moveTo(Math.round(x) + .5, 0); ctx.lineTo(Math.round(x) + .5, H); }
-    for (let y = H / 2; y <= H; y += step) { ctx.moveTo(0, Math.round(y) + .5); ctx.lineTo(W, Math.round(y) + .5); }
-    for (let y = H / 2 - step; y >= 0; y -= step) { ctx.moveTo(0, Math.round(y) + .5); ctx.lineTo(W, Math.round(y) + .5); }
+    for (let x = x0; x <= x1; x += step) { const p = Math.round(toPxX(x)) + .5; ctx.moveTo(p, 0); ctx.lineTo(p, H); }
+    for (let y = y0; y <= y1; y += step) { const p = Math.round(toPxY(y)) + .5; ctx.moveTo(0, p); ctx.lineTo(W, p); }
     ctx.stroke();
   }
 
@@ -597,11 +662,14 @@
     ctx.fillStyle = C.bg;
     ctx.fillRect(0, 0, W, H);
     ctx.lineWidth = 1;
-    gridLines(scale / 4, C.grid);          // graph-paper subdivisions (skipped when too dense)
-    gridLines(scale, C.gridStrong);        // one data unit
+    const step = gridStep();
+    gridLines(step / 4, C.grid);           // graph-paper subdivisions (skipped when too dense)
+    gridLines(step, C.gridStrong);         // one grid unit
     ctx.strokeStyle = C.axis;
     ctx.beginPath();
-    ctx.moveTo(0, Math.round(H / 2) + .5); ctx.lineTo(W, Math.round(H / 2) + .5);
+    const ax = toPxY(0), ay = toPxX(0);
+    if (ax >= 0 && ax <= H) { ctx.moveTo(0, Math.round(ax) + .5); ctx.lineTo(W, Math.round(ax) + .5); }
+    if (ay >= 0 && ay <= W) { ctx.moveTo(Math.round(ay) + .5, 0); ctx.lineTo(Math.round(ay) + .5, H); }
     ctx.stroke();
   }
 
@@ -622,7 +690,7 @@
     ctx.save();
     ctx.lineJoin = ctx.lineCap = 'round';
     ctx.strokeStyle = C.stroke;
-    ctx.globalAlpha = fit ? 0.5 : 0.9;
+    ctx.globalAlpha = (fit && mode === 'draw') ? 0.22 : fit ? 0.5 : 0.9;
     ctx.lineWidth = fit ? 2.4 : 3;
     pathThrough(stroke, p => toPxX(p.x), p => toPxY(p.y));
     ctx.stroke();
@@ -631,20 +699,21 @@
 
   function drawFit() {
     if (!fit) return;
+    const dim = mode === 'draw' ? 0.28 : 1;   // armed for a new curve: the old fit recedes
     const guard = H * 3;
     const line = (x0, x1, dashed, alpha) => {
       if (x1 <= x0) return;
       ctx.save();
       ctx.lineJoin = ctx.lineCap = 'round';
       ctx.strokeStyle = C.fit;
-      ctx.globalAlpha = alpha;
+      ctx.globalAlpha = alpha * dim;
       ctx.lineWidth = dashed ? 2 : 3.2;
       if (dashed) ctx.setLineDash([2, 7]);
       else { ctx.shadowColor = C.fit; ctx.shadowBlur = 14; }
       ctx.beginPath();
       let pen = false;
       for (let px = toPxX(x0); px <= toPxX(x1) + 1e-6; px += 1.5) {
-        const py = toPxY(evalFit(fit, px / scale));
+        const py = toPxY(evalFit(fit, dataX(px)));
         if (!isFinite(py) || py < -guard || py > H + guard) { pen = false; continue; }
         if (pen) ctx.lineTo(px, py); else { ctx.moveTo(px, py); pen = true; }
       }
@@ -654,11 +723,9 @@
     const a = fit.xmin, b = fit.xmax;
     const end = a + (b - a) * reveal;
     line(a, end, false, 1);
-    if (reveal >= 1) {
-      const tail = Math.min(0.35, (b - a) * 0.35);
-      line(0, a, true, 0.4);
-      line(b, X_SPAN, true, 0.4);
-      void tail;
+    if (reveal >= 1) {                    // extrapolation, dashed, out to the edges of the view
+      line(dataX(0), a, true, 0.4);
+      line(b, dataX(W), true, 0.4);
     }
   }
 
@@ -692,6 +759,16 @@
   }
 
   function frame(now) {
+    if (camAnim) {
+      const p = Math.min(1, (now - camAnim.t0) / camAnim.ms);
+      const e = 1 - Math.pow(1 - p, 3);
+      view.ox = camAnim.from.ox + (camAnim.to.ox - camAnim.from.ox) * e;
+      view.oy = camAnim.from.oy + (camAnim.to.oy - camAnim.from.oy) * e;
+      view.zoom = camAnim.from.zoom + (camAnim.to.zoom - camAnim.from.zoom) * e;
+      scale = base * view.zoom;
+      syncView();
+      if (p >= 1) camAnim = null;
+    }
     if (revealMs) {
       const p = Math.min(1, (now - revealAt) / revealMs);
       const eased = 1 - Math.pow(1 - p, 3);
@@ -704,24 +781,96 @@
     requestAnimationFrame(frame);
   }
 
-  // ---------- input ----------
-  function pointerPos(e) {
+  // ---------- input: draw vs. explore ----------
+  // An empty canvas is for drawing. Once a curve is fitted the canvas becomes a map you
+  // pan and zoom, and drawing again is an explicit act ("new curve" / N) — so the drag
+  // that used to wipe your work now moves the view instead.
+  const pointers = new Map();
+  let panning = false, pinch = null, spaceHeld = false;
+  let saved = null;                       // previous curve, restored if a new stroke aborts
+
+  function localPos(e) {
     const r = cv.getBoundingClientRect();
-    return toData(e.clientX - r.left, e.clientY - r.top);
+    return { px: e.clientX - r.left, py: e.clientY - r.top };
   }
 
-  cv.addEventListener('pointerdown', e => {
-    if (e.button !== undefined && e.button !== 0) return;
-    try { cv.setPointerCapture(e.pointerId); } catch { /* capture is a nicety, not a requirement */ }
+  function setMode(m) {
+    mode = m;
+    document.body.dataset.mode = m;
+    newBtn.setAttribute('aria-pressed', String(m === 'draw' && !!fit));
+    dirty = true;
+  }
+
+  function beginStroke(px, py) {
+    saved = { stroke, fit, samples };
+    stroke = [toData(px, py)];
+    fit = null; samples = [];
+    reveal = 1; revealMs = 0;
     drawing = true;
-    fit = null; reveal = 1; revealMs = 0;
-    stroke = [pointerPos(e)];
     hintEl.classList.add('gone');
     panel.classList.remove('show');
     dirty = true;
+  }
+
+  // Put back whatever was on screen before a stroke that never became one.
+  function abortStroke() {
+    drawing = false;
+    if (saved) { ({ stroke, fit, samples } = saved); saved = null; }
+    if (fit) { showResults(); setMode('pan'); }
+    else if (!stroke.length) { hintEl.classList.remove('gone'); setMode('draw'); }
+    dirty = true;
+  }
+
+  function endStroke() {
+    if (!drawing) return;
+    if (stroke.length < 4) return abortStroke();
+    drawing = false; saved = null;
+    recompute(true);
+    if (fit) { setMode('pan'); clearPanelOverlap(); }
+    dirty = true;
+  }
+
+  cv.addEventListener('pointerdown', e => {
+    if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+    const { px, py } = localPos(e);
+    pointers.set(e.pointerId, { px, py });
+    try { cv.setPointerCapture(e.pointerId); } catch { /* capture is a nicety */ }
+
+    if (pointers.size === 2) {            // second finger down: navigate, never draw
+      if (drawing) abortStroke();
+      const [a, b] = [...pointers.values()];
+      pinch = { dist: Math.hypot(a.px - b.px, a.py - b.py), mx: (a.px + b.px) / 2, my: (a.py + b.py) / 2 };
+      panning = false;
+      return;
+    }
+    if (pointers.size > 2) return;
+
+    if (mode === 'draw' && !spaceHeld) beginStroke(px, py);
+    else { panning = true; document.body.classList.add('grabbing'); }
   });
 
   cv.addEventListener('pointermove', e => {
+    const rec = pointers.get(e.pointerId);
+    if (!rec) return;
+    const { px, py } = localPos(e);
+
+    if (pinch && pointers.size >= 2) {
+      rec.px = px; rec.py = py;
+      const [a, b] = [...pointers.values()];
+      const dist = Math.hypot(a.px - b.px, a.py - b.py);
+      const mx = (a.px + b.px) / 2, my = (a.py + b.py) / 2;
+      panBy(mx - pinch.mx, my - pinch.my);
+      if (pinch.dist > 8 && dist > 8) zoomAt(dist / pinch.dist, mx, my);
+      pinch = { dist, mx, my };
+      return;
+    }
+
+    if (panning) {
+      panBy(px - rec.px, py - rec.py);
+      rec.px = px; rec.py = py;
+      return;
+    }
+
     if (!drawing) return;
     let evs = [e];
     if (e.getCoalescedEvents) {
@@ -729,23 +878,62 @@
       if (c && c.length) evs = c;
     }
     for (const ev of evs) {
-      const p = pointerPos(ev);
+      const q = localPos(ev);
+      const p = toData(q.px, q.py);
       const last = stroke[stroke.length - 1];
       if (!last || Math.hypot(p.x - last.x, p.y - last.y) * scale > 1.2) stroke.push(p);
     }
+    rec.px = px; rec.py = py;
     dirty = true;
   });
 
-  function endStroke() {
-    if (!drawing) return;
-    drawing = false;
-    if (stroke.length < 4) { stroke = []; hintEl.classList.remove('gone'); dirty = true; return; }
-    recompute(true);
+  function releasePointer(e) {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (pointers.size === 0) {
+      if (panning) { panning = false; document.body.classList.remove('grabbing'); }
+      endStroke();
+    }
   }
-  cv.addEventListener('pointerup', endStroke);
-  cv.addEventListener('pointercancel', endStroke);
-  addEventListener('pointerup', endStroke);      // backstop if the pointer is released off-canvas
-  addEventListener('blur', endStroke);
+  cv.addEventListener('pointerup', releasePointer);
+  cv.addEventListener('pointercancel', releasePointer);
+  addEventListener('pointerup', e => { if (pointers.has(e.pointerId)) releasePointer(e); });
+  addEventListener('blur', () => {
+    pointers.clear(); pinch = null;
+    if (panning) { panning = false; document.body.classList.remove('grabbing'); }
+    if (drawing) endStroke();
+  });
+
+  // Trackpad pinch arrives as ctrl+wheel; plain scroll pans, the way a canvas should.
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    const { px, py } = localPos(e);
+    const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? H : 1;   // lines / pages / pixels
+    if (e.ctrlKey || e.metaKey) zoomAt(Math.exp(-e.deltaY * k * 0.01), px, py);
+    else panBy(-e.deltaX * k, -e.deltaY * k);
+  }, { passive: false });
+
+  // If the panel landed on top of the curve, lift the view just clear of it.
+  function clearPanelOverlap() {
+    if (!fit || !stroke.length || reduceMotion) return;
+    const r = panel.getBoundingClientRect();
+    if (!r.height) return;
+    const panelTop = H - 18 - r.height, left = (W - r.width) / 2, right = left + r.width;
+    let top = Infinity, bottom = -Infinity;
+    for (const p of stroke) {
+      const y = toPxY(p.y), x = toPxX(p.x);
+      if (y < top) top = y;
+      if (x >= left && x <= right && y > bottom) bottom = y;
+    }
+    const overlap = bottom - (panelTop - 14);
+    if (!(overlap > 0)) return;
+    const shift = Math.min(overlap, H * 0.28);
+    if (top - shift < 12) return;         // don't push the curve off the top to fix the bottom
+    animateView({ oy: view.oy - shift }, 420);
+  }
+
+  newBtn.addEventListener('click', () => setMode(mode === 'draw' ? 'pan' : 'draw'));
+  recenterBtn.addEventListener('click', () => resetView(true));
 
   degSlider.addEventListener('input', () => {
     setSlider(+degSlider.value);
@@ -761,8 +949,11 @@
 
   function clearAll() {
     stroke = []; samples = []; fit = null; drawing = false; revealMs = 0;
+    saved = null; camAnim = null;
+    resetView(false);
     panel.classList.remove('show');
     hintEl.classList.remove('gone');
+    setMode('draw');
     dirty = true;
   }
   $('clearBtn').addEventListener('click', clearAll);
@@ -841,10 +1032,16 @@
     });
   });
 
+  addEventListener('keyup', e => { if (e.code === 'Space') spaceHeld = false; });
   addEventListener('keydown', e => {
+    if (e.code === 'Space' && !drawing) { spaceHeld = true; e.preventDefault(); }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const k = e.key.toLowerCase();
     if (k === 'c') { clearAll(); }
+    else if (k === 'n') { if (fit) setMode(mode === 'draw' ? 'pan' : 'draw'); }
+    else if (k === '0') { resetView(true); }
+    else if (k === '=' || k === '+') { zoomAt(1.25, W / 2, H / 2); }
+    else if (k === '-') { zoomAt(0.8, W / 2, H / 2); }
     else if (k === 'm') { setModel(model === 'poly' ? 'logistic' : 'poly'); }
     else if (k === 'a') { if (model === 'poly') autoBtn.click(); }
     else if (k === 's') { e.preventDefault(); $('saveBtn').click(); }
@@ -882,7 +1079,7 @@
       for (let k = 0; k < chunk && i < pts.length; k++, i++) stroke.push(pts[i]);
       dirty = true;
       if (i < pts.length) requestAnimationFrame(step);
-      else recompute(true);
+      else { recompute(true); if (fit) { setMode('pan'); clearPanelOverlap(); } }
     })();
   });
 
@@ -890,7 +1087,16 @@
   const themeQuery = matchMedia('(prefers-color-scheme: dark)');
   themeQuery.addEventListener?.('change', () => { readTheme(); dirty = true; });
   addEventListener('resize', () => { readTheme(); resize(); });
+  // Opt-in inspection seam for automated tests; absent unless ?debug is on the URL.
+  if (/[?&]debug\b/.test(location.search)) {
+    window.__doodle = {
+      view, dataX, dataY, zoomAt, panBy, resetView,
+      get state() { return { mode, model, fit, strokePts: stroke.length, samples: samples.length }; }
+    };
+  }
+
   readTheme();
+  setMode('draw');
   setModel('poly');
   setSlider(3);
   resize();
