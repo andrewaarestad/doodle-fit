@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>doodle fit — draw a curve, get a polynomial</title>
-<meta name="description" content="Draw a curve with your finger or mouse and watch a least-squares polynomial fit itself to your doodle. No dependencies, no build step.">
+<title>doodle fit — draw a curve, fit a model</title>
+<meta name="description" content="Draw a curve with your finger or mouse and watch a polynomial or logistic model fit itself to your doodle. No dependencies, no build step.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23faf8f3'/%3E%3Cpath d='M4 22C9 6 15 26 21 14s6-6 7-8' fill='none' stroke='%23e8590c' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -124,6 +124,17 @@
   }
   .chip:hover{color:var(--ink)}
   .chip[aria-pressed="true"]{background:var(--fit); border-color:var(--fit); color:#fff}
+  select{
+    font:inherit; font-size:12.5px; color:var(--ink); cursor:pointer;
+    background:transparent; border:1px solid var(--panel-line); border-radius:9px;
+    padding:5px 8px; transition:border-color .15s ease;
+  }
+  select:hover{border-color:var(--ink-faint)}
+  .modelStats{display:flex; gap:18px; flex:1}
+  .modelStats .k{font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-faint)}
+  .modelStats .v{font-size:13.5px; font-weight:600; font-variant-numeric:tabular-nums}
+  body[data-model="poly"] .logisticOnly{display:none}
+  body[data-model="logistic"] .polyOnly{display:none}
 
   .eq{
     margin-top:11px; font:13.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
@@ -165,13 +176,13 @@
 
 <div class="brand">
   <h1><span class="dot"></span>doodle fit</h1>
-  <p>draw a curve — get the polynomial</p>
+  <p>draw a curve — fit a model</p>
 </div>
 
-<div class="keys"><kbd>[</kbd> <kbd>]</kbd> degree · <kbd>A</kbd> auto · <kbd>C</kbd> clear · <kbd>S</kbd> save</div>
+<div class="keys"><kbd>M</kbd> model · <kbd>[</kbd> <kbd>]</kbd> degree · <kbd>A</kbd> auto · <kbd>C</kbd> clear · <kbd>S</kbd> save</div>
 
 <div class="hint" id="hint">
-  <h2>Draw a curve<span>click or touch anywhere and sketch, left to right</span></h2>
+  <h2>Draw a curve<span>sketch left to right, then fit a polynomial or a logistic curve</span></h2>
   <button class="demo" id="demoBtn">draw one for me</button>
 </div>
 
@@ -189,9 +200,17 @@
     </div>
   </div>
   <div class="row deg">
-    <label for="degree">degree <b id="degVal">3</b></label>
-    <input id="degree" type="range" min="1" max="15" step="1" value="3" aria-label="Polynomial degree">
-    <button class="chip" id="autoBtn" aria-pressed="true">auto</button>
+    <select id="model" aria-label="Model type">
+      <option value="poly">polynomial</option>
+      <option value="logistic">logistic</option>
+    </select>
+    <label class="polyOnly" for="degree">degree <b id="degVal">3</b></label>
+    <input class="polyOnly" id="degree" type="range" min="1" max="15" step="1" value="3" aria-label="Polynomial degree">
+    <button class="chip polyOnly" id="autoBtn" aria-pressed="true">auto</button>
+    <div class="modelStats logisticOnly">
+      <div class="stat"><span class="k">midpoint</span><span class="v" id="mid">—</span></div>
+      <div class="stat"><span class="k">steepness</span><span class="v" id="steep">—</span></div>
+    </div>
   </div>
   <div class="eq" id="eq"></div>
   <div class="note" id="note"></div>
@@ -209,6 +228,7 @@
   const hintEl = $('hint'), panel = $('panel'), eqEl = $('eq'), noteEl = $('note');
   const r2El = $('r2'), rmseEl = $('rmse'), degSlider = $('degree'), degVal = $('degVal');
   const autoBtn = $('autoBtn'), toastEl = $('toast');
+  const modelSel = $('model'), midEl = $('mid'), steepEl = $('steep');
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // ---------- view: canvas px <-> data units (x spans 0..10, y scaled equally) ----------
@@ -233,6 +253,7 @@
   let fit = null;           // { c, deg, xc, xs, r2, rmse, xmin, xmax }
   let drawing = false;
   let autoDegree = true;
+  let model = 'poly';           // 'poly' | 'logistic'
   let reveal = 1;           // 0..1 sweep animation for the fitted curve
   let revealFrom = 0, revealAt = 0, revealMs = 0;
   let dirty = true, idleT = 0;
@@ -273,21 +294,46 @@
     return x;
   }
 
-  // Coefficients live in t = (x - xc)/xs, which keeps high degrees well conditioned.
+  // Both models work in t = (x - xc)/xs, which keeps them well conditioned.
   const evalFit = (f, x) => {
     const t = (x - f.xc) / f.xs;
+    if (f.kind === 'logistic') return f.y0 + f.span / (1 + Math.exp(-(f.b0 + f.b1 * t)));
     let v = 0;
     for (let i = f.c.length - 1; i >= 0; i--) v = v * t + f.c[i];
     return v;
   };
 
+  // Residual stats, shared by both models so R² and RMSE are directly comparable.
+  function scoreFit(f, pts) {
+    const m = pts.length;
+    let sy = 0;
+    for (const p of pts) sy += p.y;
+    const my = sy / m;
+    let sse = 0, sst = 0;
+    for (const p of pts) {
+      const r = p.y - evalFit(f, p.x);
+      sse += r * r;
+      sst += (p.y - my) * (p.y - my);
+    }
+    f.sse = sse;
+    f.rmse = Math.sqrt(sse / m);
+    f.r2 = sst > 1e-12 ? Math.max(0, 1 - sse / sst) : 1;
+    return f;
+  }
+
+  function spanOf(pts) {
+    let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+    for (const p of pts) {
+      if (p.x < xmin) xmin = p.x; if (p.x > xmax) xmax = p.x;
+      if (p.y < ymin) ymin = p.y; if (p.y > ymax) ymax = p.y;
+    }
+    return { xmin, xmax, ymin, ymax, xc: (xmin + xmax) / 2, xs: Math.max((xmax - xmin) / 2, 1e-9) };
+  }
+
   function fitPoly(pts, degree) {
     const m = pts.length;
     if (m < 2) return null;
-    let xmin = Infinity, xmax = -Infinity;
-    for (const p of pts) { if (p.x < xmin) xmin = p.x; if (p.x > xmax) xmax = p.x; }
-    const xc = (xmin + xmax) / 2;
-    const xs = Math.max((xmax - xmin) / 2, 1e-9);
+    const { xmin, xmax, xc, xs } = spanOf(pts);
     const deg = Math.max(1, Math.min(degree, m - 1, 15));
     const n = deg + 1;
     const A = new Float64Array(m * n), b = new Float64Array(m);
@@ -298,20 +344,53 @@
       b[i] = pts[i].y;
     }
     const c = lstsq(A, b, m, n);
-    let sse = 0, sy = 0;
-    for (const p of pts) sy += p.y;
-    const my = sy / m;
-    let sst = 0;
-    const f = { c, deg, xc, xs, xmin, xmax };
-    for (const p of pts) {
-      const r = p.y - evalFit(f, p.x);
-      sse += r * r;
-      sst += (p.y - my) * (p.y - my);
+    return scoreFit({ kind: 'poly', c, deg, xc, xs, xmin, xmax }, pts);
+  }
+
+  // Logistic model: y is rescaled to a probability across the stroke's own y-range, then
+  // ŷ = y0 + span·σ(b0 + b1·t) is fitted by maximum likelihood (Newton / IRLS on the
+  // Bernoulli log-likelihood with fractional targets). Two parameters, converges in a
+  // handful of steps, and the S stays bounded when extrapolated.
+  function fitLogistic(pts) {
+    const m = pts.length;
+    if (m < 2) return null;
+    const { xmin, xmax, ymin, ymax, xc, xs } = spanOf(pts);
+    const span = ymax - ymin;
+    const f = { kind: 'logistic', xc, xs, xmin, xmax, y0: ymin, span, b0: 0, b1: 0 };
+    if (span < 1e-9) return scoreFit(f, pts);   // a flat stroke: the S degenerates to a line
+
+    const EPS = 1e-3;
+    const u = new Float64Array(m), t = new Float64Array(m);
+    for (let i = 0; i < m; i++) {
+      u[i] = (pts[i].x - xc) / xs;
+      t[i] = Math.min(1 - EPS, Math.max(EPS, (pts[i].y - ymin) / span));
     }
-    f.sse = sse;
-    f.rmse = Math.sqrt(sse / m);
-    f.r2 = sst > 1e-12 ? Math.max(0, 1 - sse / sst) : 1;
-    return f;
+    let b0 = 0, b1 = 0;
+    for (let it = 0; it < 60; it++) {
+      let g0 = 0, g1 = 0, h00 = 0, h01 = 0, h11 = 0;
+      for (let i = 0; i < m; i++) {
+        const pr = 1 / (1 + Math.exp(-(b0 + b1 * u[i])));
+        const w = Math.max(pr * (1 - pr), 1e-6), r = t[i] - pr;
+        g0 += r; g1 += r * u[i];
+        h00 += w; h01 += w * u[i]; h11 += w * u[i] * u[i];
+      }
+      const lam = 1e-6 * m;               // keeps the Hessian invertible on separable data
+      h00 += lam; h11 += lam;
+      const det = h00 * h11 - h01 * h01;
+      if (!isFinite(det) || Math.abs(det) < 1e-12) break;
+      const d0 = (h11 * g0 - h01 * g1) / det;
+      const d1 = (-h01 * g0 + h00 * g1) / det;
+      b0 += d0; b1 += d1;
+      if (Math.abs(d0) + Math.abs(d1) < 1e-10) break;
+    }
+    f.b0 = b0; f.b1 = b1;
+    return scoreFit(f, pts);
+  }
+
+  // b0 + b1·t expressed in plain x, for display and for the midpoint/steepness readouts.
+  function logitInX(f) {
+    const b1 = f.b1 / f.xs;
+    return { b1, b0: f.b0 - f.b1 * f.xc / f.xs };
   }
 
   // Generalized cross-validation picks the simplest degree that still explains the doodle.
@@ -376,9 +455,11 @@
   function recompute(animate) {
     samples = resample(stroke);
     if (samples.length < 4) { fit = null; panel.classList.remove('show'); dirty = true; return; }
-    fit = autoDegree ? bestFit(samples) : fitPoly(samples, +degSlider.value);
+    fit = model === 'logistic'
+      ? fitLogistic(samples)
+      : (autoDegree ? bestFit(samples) : fitPoly(samples, +degSlider.value));
     if (!fit) return;
-    if (autoDegree) setSlider(fit.deg);
+    if (model === 'poly' && autoDegree) setSlider(fit.deg);
     if (animate && !reduceMotion) startReveal(0, 620); else reveal = 1;
     showResults();
     dirty = true;
@@ -414,7 +495,19 @@
     return String(+v.toPrecision(3));
   }
 
+  // "1.85x − 7.94", the logit written in plain x
+  function linearText(b1, b0) {
+    const lead = (b1 < 0 ? '−' : '') + num(Math.abs(b1)) + 'x';
+    return lead + (b0 < 0 ? ' − ' : ' + ') + num(Math.abs(b0));
+  }
+
   function equationText(f) {
+    if (f.kind === 'logistic') {
+      if (f.span < 1e-9) return 'ŷ = ' + num(f.y0);   // a flat stroke has no S to describe
+      const { b0, b1 } = logitInX(f);
+      const base = f.y0 < 0 ? '−' + num(Math.abs(f.y0)) : num(f.y0);
+      return `ŷ = ${base} + ${num(f.span)}/(1 + exp(−(${linearText(b1, b0)})))`;
+    }
     const c = coeffsInX(f);
     let peak = 0;
     for (const v of c) peak = Math.max(peak, Math.abs(v));
@@ -430,18 +523,49 @@
     return 'ŷ = ' + (parts.join('') || '0');
   }
 
+  // how much of the vertical travel runs against the dominant direction
+  function reversalRatio(pts) {
+    let up = 0, down = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const dy = pts[i].y - pts[i - 1].y;
+      if (dy > 0) up += dy; else down -= dy;
+    }
+    const total = up + down;
+    return total > 1e-9 ? Math.min(up, down) / total : 0;
+  }
+
   function showResults() {
     if (!fit) return;
     r2El.textContent = fit.r2 >= 0.9995 ? '1.000' : fit.r2.toFixed(3);
     rmseEl.textContent = fit.rmse.toFixed(3);
-    degVal.textContent = fit.deg;
     eqEl.textContent = equationText(fit);
     const back = backtrackRatio(samples);
-    noteEl.textContent = back > 0.12
-      ? 'Heads up: your doodle loops back on itself, and a polynomial only has one y per x — draw left to right for a tighter fit.'
-      : (fit.deg >= 10 ? 'High degree: hugs your ink, goes wild everywhere else — the printed coefficients are rounded.' : '');
+
+    if (fit.kind === 'logistic') {
+      const { b0, b1 } = logitInX(fit);
+      midEl.textContent = Math.abs(b1) > 1e-6 ? num(-b0 / b1) : '—';
+      steepEl.textContent = num(b1);
+      noteEl.textContent = back > 0.12
+        ? 'Heads up: your doodle loops back on itself, and a model of x only has one y per x — draw left to right for a tighter fit.'
+        : (reversalRatio(samples) > 0.15
+          ? 'A logistic curve is one monotonic S, so it flattens the turns in this doodle — try polynomial for a curve that doubles back.'
+          : '');
+    } else {
+      degVal.textContent = fit.deg;
+      noteEl.textContent = back > 0.12
+        ? 'Heads up: your doodle loops back on itself, and a polynomial only has one y per x — draw left to right for a tighter fit.'
+        : (fit.deg >= 10 ? 'High degree: hugs your ink, goes wild everywhere else — the printed coefficients are rounded.' : '');
+    }
     panel.classList.add('show');
   }
+
+  function setModel(m) {
+    model = m;
+    modelSel.value = m;
+    document.body.dataset.model = m;
+    if (samples.length >= 4) recompute(true);
+  }
+  modelSel.addEventListener('change', () => setModel(modelSel.value));
 
   function setSlider(d) {
     degSlider.value = d;
@@ -626,13 +750,13 @@
   degSlider.addEventListener('input', () => {
     setSlider(+degSlider.value);
     if (autoDegree) { autoDegree = false; autoBtn.setAttribute('aria-pressed', 'false'); }
-    if (samples.length >= 4) { fit = fitPoly(samples, +degSlider.value); reveal = 1; revealMs = 0; showResults(); dirty = true; }
+    if (model === 'poly' && samples.length >= 4) { fit = fitPoly(samples, +degSlider.value); reveal = 1; revealMs = 0; showResults(); dirty = true; }
   });
 
   autoBtn.addEventListener('click', () => {
     autoDegree = !autoDegree;
     autoBtn.setAttribute('aria-pressed', String(autoDegree));
-    if (autoDegree && samples.length >= 4) { fit = bestFit(samples); setSlider(fit.deg); reveal = 1; showResults(); dirty = true; }
+    if (model === 'poly' && autoDegree && samples.length >= 4) { fit = bestFit(samples); setSlider(fit.deg); reveal = 1; showResults(); dirty = true; }
   });
 
   function clearAll() {
@@ -678,7 +802,8 @@
       else line = next;
     }
     if (line) lines.push(line);
-    const stats = `degree ${fit.deg}   R² ${fit.r2 >= 0.9995 ? '1.000' : fit.r2.toFixed(3)}   RMSE ${fit.rmse.toFixed(3)}`;
+    const kind = fit.kind === 'logistic' ? 'logistic' : `polynomial · degree ${fit.deg}`;
+    const stats = `${kind}   R² ${fit.r2 >= 0.9995 ? '1.000' : fit.r2.toFixed(3)}   RMSE ${fit.rmse.toFixed(3)}`;
 
     const boxW = Math.max(...lines.map(t => o.measureText(t).width), o.measureText(stats).width) + pad * 2;
     const boxH = (lines.length + 1) * lh + pad * 2 - 4;
@@ -720,13 +845,14 @@
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const k = e.key.toLowerCase();
     if (k === 'c') { clearAll(); }
-    else if (k === 'a') { autoBtn.click(); }
+    else if (k === 'm') { setModel(model === 'poly' ? 'logistic' : 'poly'); }
+    else if (k === 'a') { if (model === 'poly') autoBtn.click(); }
     else if (k === 's') { e.preventDefault(); $('saveBtn').click(); }
     else if (k === '[' || k === 'arrowleft') { nudge(-1); }
     else if (k === ']' || k === 'arrowright') { nudge(1); }
   });
   function nudge(d) {
-    if (!fit) return;
+    if (!fit || model !== 'poly') return;
     const next = Math.max(1, Math.min(15, +degSlider.value + d));
     setSlider(next);
     degSlider.dispatchEvent(new Event('input'));
@@ -744,7 +870,10 @@
       const x = 0.8 + u * 8.4;
       // a couple of pixels of high-frequency hand tremor: visible as ink, ignored by the fit
       const tremor = (Math.sin(u * 61 + seed) * 0.6 + Math.sin(u * 97 + seed * 2) * 0.4) * (1.8 / scale);
-      const y = (Math.sin(u * 5.1 + seed) * 0.6 + Math.sin(u * 2 + seed * 0.5) * 0.5 - 0.15) * yScale + tremor;
+      const shape = model === 'logistic'
+        ? (2 / (1 + Math.exp(-(u - 0.45 + Math.sin(seed) * 0.08) * 11)) - 1) * 0.85   // an S to fit
+        : Math.sin(u * 5.1 + seed) * 0.6 + Math.sin(u * 2 + seed * 0.5) * 0.5 - 0.15;
+      const y = shape * yScale + tremor;
       pts.push({ x, y });
     }
     let i = 0;
@@ -762,6 +891,7 @@
   themeQuery.addEventListener?.('change', () => { readTheme(); dirty = true; });
   addEventListener('resize', () => { readTheme(); resize(); });
   readTheme();
+  setModel('poly');
   setSlider(3);
   resize();
   requestAnimationFrame(frame);
